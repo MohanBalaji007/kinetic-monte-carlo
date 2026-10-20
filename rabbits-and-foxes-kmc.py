@@ -783,9 +783,113 @@ for column, name, unit in [(0, "time", "days"), (1, "height", "foxes")]:
 #   happen?
 
 # %%
+peaks, foxes_end, t_extinct = sets[3000]
+N = len(foxes_end)
+extinct = foxes_end == 0
+p = extinct.mean()
+p_se = np.sqrt(p * (1 - p) / N)
+print(f"foxes extinct by day {t_end} in {extinct.sum()} of {N} runs: p = {p:.3f} ± {p_se:.3f}")
+print(f"95% confidence interval (± 1.96 SE): {p - 1.96 * p_se:.3f} to {p + 1.96 * p_se:.3f}")
+
+print("\nthe same from the smaller sets:")
+for n_runs in run_counts:
+    q = (sets[n_runs][1] == 0).mean()
+    print(f"  N = {n_runs:4d}: p = {q:.3f} ± {np.sqrt(q * (1 - q) / n_runs):.3f}")
+
+# Runs needed so that sqrt(p (1 - p) / N) is a given size
+print("\nruns needed (using p = {:.3f}):".format(p))
+for target in [0.01, 0.001]:
+    n_se = p * (1 - p) / target**2
+    n_95 = p * (1 - p) * (1.96 / target) ** 2
+    print(f"  ± {target * 100:.1f} percentage point: SE = {target} needs {n_se:,.0f} runs; "
+          f"95% interval ± {target} needs {n_95:,.0f} runs "
+          f"(about {n_95 * per_run / 3600:.1f} h at {per_run * 1000:.0f} ms/run)")
+
+# When the foxes die out, and whether the run had a second peak first
+had_peak = ~np.isnan(peaks[:, 0])
+t_dead = t_extinct[extinct]
+print(f"\nextinction times: median day {np.median(t_dead):.0f}, IQR day "
+      f"{np.percentile(t_dead, 25):.0f} to {np.percentile(t_dead, 75):.0f}, "
+      f"range day {t_dead.min():.0f} to {t_dead.max():.0f}")
+print(f"extinct with no second peak (first trough): {(extinct & ~had_peak).sum()}")
+print(f"extinct after a second peak (second trough): {(extinct & had_peak).sum()}")
+print(f"alive at day {t_end} with no second peak:      {(~extinct & ~had_peak).sum()}")
+print(f"alive at day {t_end} after a second peak:      {(~extinct & had_peak).sum()}")
+
+# %%
+fig, ax = plt.subplots(figsize=(10, 4.5))
+bins = np.arange(0, t_end + 10, 10)
+ax.hist([t_extinct[extinct & ~had_peak], t_extinct[extinct & had_peak]], bins=bins,
+        stacked=True, color=["C0", "C1"],
+        label=["no second peak (died in the first trough)", "after a second peak"])
+ax.axvline(np.median(t_dead), color="C3", ls="--", label=f"median, day {np.median(t_dead):.0f}")
+ax.set_xlabel("day the last fox died")
+ax.set_ylabel("number of runs (10-day bins)")
+ax.set_title(f"When the foxes die out: {extinct.sum()} of {N} runs")
+
+ax_ode = ax.twinx()
+ax_ode.semilogy(t_ode, F_ode, "k", lw=1, label="foxes (ODE)")
+ax_ode.semilogy(t_ode, R_ode, "k:", lw=1, label="rabbits (ODE)")
+ax_ode.axhline(k4 / k3, color="0.5", lw=0.8, ls="-.")
+ax_ode.text(5, k4 / k3 * 1.15, "R = k4/k3 = 100", color="0.4", fontsize=8)
+ax_ode.set_ylabel("ODE population (log scale)")
+lines = ax.get_legend_handles_labels()
+lines_ode = ax_ode.get_legend_handles_labels()
+ax.legend(lines[0] + lines_ode[0], lines[1] + lines_ode[1], loc="upper right", fontsize=8)
+plt.tight_layout()
+plt.show()
 
 # %% [markdown]
 # *Answer:*
+#
+# **The probability.** In the 3000-run set, the foxes were extinct by day 600 in 2053
+# runs, so
+#
+# $$p = 0.684 \pm 0.008 \qquad \left(\text{SE} = \sqrt{p(1-p)/N} = \sqrt{0.684 \times 0.316 / 3000}\right)$$
+#
+# **The foxes die out within 600 days in 68.4 ± 0.8% of runs** (95% confidence
+# interval 66.8–70.1%). The smaller sets (76 ± 4%, 64 ± 3%, 70 ± 1%) scatter around
+# this value by about their own standard errors, the same pattern as the means in
+# task 4. The ODE says the probability is zero.
+#
+# **Runs needed.** The standard error is $\sqrt{p(1-p)/N}$, so
+# $N = p(1-p)/\text{SE}^2$. With $p \approx 0.68$:
+#
+# | precision | SE = target | 95% interval = ± target ($N = 1.96^2\,p(1-p)/\text{target}^2$) |
+# |---|---|---|
+# | ± 1 percentage point | **about 2,200 runs** (2 min) | about 8,300 runs (7 min) |
+# | ± 0.1 percentage point | **about 216,000 runs** (3 h) | about 830,000 runs (12 h) |
+#
+# Taking "to within ±1 point" as one standard error, our 3000 runs already do it
+# (±0.8). Ten times the precision costs **100 times** the runs, because the error falls
+# as $1/\sqrt{N}$. The ±0.1 point case would need a batch job on Explorer (stretch
+# problem (b)), or a faster `kmc`. The required $N$ depends on $p$ itself through
+# $p(1-p)$, which is largest at $p = 0.5$. Near 0.68 it's 0.22, so a rough $p$ is good
+# enough for planning.
+#
+# **When the foxes die out.** The histogram has two groups:
+#
+# - **The first trough: 2008 of the 2053 extinctions (98%).** These runs never had a
+#   second peak. The last fox died between about day 200 and 400, with a **median of
+#   day 269 and an IQR of days 248–296**. That is on the falling side of the ODE's fox
+#   trough, centred a month before its minimum of 1.6 foxes at day 298. This is the
+#   pattern from task 2, now with 2000 runs: the dangerous time is when the foxes
+#   are down to a handful **and** the rabbits are still below $k_4/k_3 = 100$, so
+#   each fox is more likely to die than to breed. After about day 300 the rabbits pass
+#   100, surviving foxes start to multiply, and extinctions tail off. A small tail out
+#   to about day 450 comes from runs whose rabbits lagged behind or whose foxes
+#   lingered at a few individuals.
+# - **The second trough: 45 extinctions (2%), all after day 520.** These runs survived
+#   the first trough, had a second peak, and are now heading into the next trough. The
+#   number per bin is still rising at day 600.
+#
+# Every run that was alive at day 600 had had a second peak (947 runs). So the
+# "probability that the foxes die out before 600 days" depends on the cut-off. Day 600
+# falls partway into the second trough, which the ODE puts at about day 690. With a
+# longer simulation, many of the 947 survivors would die out there too, and $p$ would
+# keep rising with every cycle. In the long run the foxes are almost certain to die
+# out. **68% is the chance it happens within the first cycle and a bit**, not an
+# overall survival probability.
 
 # %% [markdown]
 # ## 6. Your project
