@@ -395,9 +395,195 @@ print(f"\nfoxes died out in {n_extinct} of {len(trajectories)} runs")
 # call "the second peak", if you can.
 
 # %%
+def second_peak(times, foxes, t_start=200, t_stop=t_end, margin=5, min_height=100):
+    """The largest number of foxes between t_start and t_stop, as (time, height).
+
+    Returns None if that maximum is not above min_height foxes, or is within margin
+    days of either end of the window. The time is when the maximum was first reached.
+    """
+    # The population is a step function: foxes[i] holds from times[i] to times[i + 1].
+    i0 = np.searchsorted(times, t_start, side="right") - 1  # last event at or before t_start
+    i1 = np.searchsorted(times, t_stop, side="right")  # first event after t_stop
+    t_window = np.concatenate(([t_start], times[i0 + 1:i1]))
+    f_window = foxes[i0:i1]  # f_window[0] is the population at t_start itself
+
+    j = np.argmax(f_window)
+    t_peak, height = t_window[j], f_window[j]
+    if height <= min_height:
+        return None
+    if t_peak < t_start + margin or t_peak > t_stop - margin:
+        return None
+    return t_peak, height
+
+
+# The ODE's second peak, through the same function, as a check
+t_ode_peak, F_ode_peak = second_peak(t_ode, F_ode)
+print(f"ODE second peak: day {t_ode_peak:.1f}, {F_ode_peak:.0f} foxes")
+
+
+def peak_stats(peaks):
+    """Print mean, median and IQR of peak times and heights; peaks is an (n, 2) array."""
+    for column, name, unit in [(0, "time", "days"), (1, "height", "foxes")]:
+        x = peaks[:, column]
+        q25, q75 = np.percentile(x, [25, 75])
+        print(f"  {name:6s}  mean {x.mean():7.1f}  median {np.median(x):7.1f}  "
+              f"IQR {q25:7.1f} to {q75:7.1f} {unit}")
+
+
+n_runs = 100
+rng = np.random.default_rng(3)
+start = time.perf_counter()
+trajectories = [kmc(R0, F0, t_end, rng) for _ in range(n_runs)]
+print(f"\n{n_runs} trajectories in {time.perf_counter() - start:.1f} s")
+
+results = [second_peak(times, foxes) for times, rabbits, foxes in trajectories]
+peaks = np.array([p for p in results if p is not None])
+print(f"second peak in {len(peaks)} of {n_runs} runs ({len(peaks) / n_runs:.0%})")
+peak_stats(peaks)
+
+# %%
+fig, (ax_t, ax_h) = plt.subplots(1, 2, figsize=(11, 4))
+for ax, column, ode_value, xlabel in [
+    (ax_t, 0, t_ode_peak, "time of second peak (days)"),
+    (ax_h, 1, F_ode_peak, "height of second peak (foxes)"),
+]:
+    x = peaks[:, column]
+    ax.hist(x, bins=12, color="C0", alpha=0.7)
+    ax.axvline(ode_value, color="k", lw=2, label="ODE")
+    ax.axvline(x.mean(), color="C3", ls="--", label="KMC mean")
+    ax.axvline(np.median(x), color="C1", ls=":", lw=2, label="KMC median")
+    ax.axvspan(*np.percentile(x, [25, 75]), color="C0", alpha=0.15, label="KMC IQR")
+    ax.set_xlabel(xlabel)
+    ax.set_ylabel("number of runs")
+ax_t.legend()
+fig.suptitle(f"Second fox peak, {len(peaks)} of {n_runs} KMC runs")
+plt.tight_layout()
+plt.show()
+
+# %% [markdown]
+# **Why the peaks differ from the ODE, and what the definition gets wrong.** Three
+# checks: (1) does the depth of a run's trough predict its second peak? (2) what do
+# ODE cycles look like if they start from a shallower trough? (3) how far is the
+# definition's raw maximum from the peak of the curve smoothed over 2 days?
+
+# %%
+# (1) The lowest number of foxes in the trough, for the runs with a second peak
+trough_min = np.array([
+    foxes[(times > 150) & (times < p[0])].min()
+    for (times, rabbits, foxes), p in zip(trajectories, results) if p is not None
+])
+print("lowest foxes in the trough, runs with a second peak:", np.sort(trough_min))
+print(f"correlation of trough minimum with peak time {np.corrcoef(trough_min, peaks[:, 0])[0, 1]:.2f},"
+      f" with peak height {np.corrcoef(trough_min, peaks[:, 1])[0, 1]:.2f}")
+
+# (2) ODE cycles through the fox trough (R = k4/k3 = 100 rabbits) at different depths
+print("\nODE cycle through a trough of F foxes:")
+t_orbit = np.linspace(0, 300, 30001)
+for F_trough in [1.6, 3, 5, 10, 20]:
+    orbit = solve_ivp(dydt, (0, 300), [k4 / k3, F_trough], rtol=1e-10, atol=1e-10,
+                      dense_output=True)
+    F_orbit = orbit.sol(t_orbit)[1]
+    print(f"  F = {F_trough:4}: next peak {F_orbit.max():5.0f} foxes, "
+          f"{t_orbit[F_orbit.argmax()]:.0f} days after the trough")
+
+# (3) Raw maximum against the maximum of the step function averaged over 2 days
+t_grid = np.arange(200, t_end, 0.05)
+width = int(2 / 0.05)
+offsets = []
+for n, ((times, rabbits, foxes), p) in enumerate(zip(trajectories, results)):
+    if p is None:
+        continue
+    f_grid = foxes[np.searchsorted(times, t_grid, side="right") - 1]
+    smooth = np.convolve(f_grid, np.ones(width) / width, mode="same")
+    j = np.argmax(smooth[width:-width]) + width  # skip the ends, where the average is cut off
+    offsets.append((n, p[0] - t_grid[j], p[1] - smooth[j]))
+offsets = np.array(offsets)
+print(f"\nraw maximum minus smoothed maximum: height {offsets[:, 2].mean():+.1f} foxes on average "
+      f"({offsets[:, 2].min():+.0f} to {offsets[:, 2].max():+.0f}), "
+      f"time up to {np.abs(offsets[:, 1]).max():.1f} days off")
+
+worst = int(offsets[np.abs(offsets[:, 1]).argmax(), 0])
+times, rabbits, foxes = trajectories[worst]
+t_peak, height = results[worst]
+near = (times > t_peak - 25) & (times < t_peak + 25)
+plt.step(times[near], foxes[near], where="post", lw=0.7, label=f"run {worst}")
+f_grid = foxes[np.searchsorted(times, t_grid, side="right") - 1]
+plt.plot(t_grid, np.convolve(f_grid, np.ones(width) / width, mode="same"), "k",
+         label="2-day average")
+plt.plot(t_peak, height, "rv", ms=10, label="second_peak()")
+plt.xlim(t_peak - 25, t_peak + 25)
+plt.ylim(0.9 * height, 1.01 * height)
+plt.xlabel("time (days)")
+plt.ylabel("foxes")
+plt.title(f"Run {worst}: the largest offset between raw and smoothed peak")
+plt.legend()
+plt.show()
 
 # %% [markdown]
 # *Answer:*
+#
+# **Results, 100 runs (seed 3).** There was a second peak in **36 of 100 runs (36%)**.
+# In the other 64 the foxes died out in the trough, so there was no second peak to
+# find.
+#
+# | | mean | median | IQR (25th–75th) | ODE |
+# |---|---|---|---|---|
+# | time (days) | 405 | 402 | 386 – 427 | 428 |
+# | height (foxes) | 2282 | 2129 | 1886 – 2539 | 2804 |
+#
+# **Compared with the ODE**, the KMC second peak comes about **3 weeks earlier** and is
+# about **500 foxes lower**. The ODE's time is at the very top of the KMC interquartile
+# range, and its height is above it. The spread is wide: peaks run from day 351 to 480 and
+# from 1634 to 3604 foxes, so a few runs peak later or higher than the ODE. But the
+# mean and median are both clearly earlier and lower, and the mean height is above the
+# median because the height distribution has a long tail to the right.
+#
+# **Why they differ.** The second peak only exists in runs whose foxes **survived** the
+# trough. Those aren't a random sample: they're the runs that got through it. The
+# depth of the trough sets the next cycle. Lotka–Volterra cycles are closed orbits around
+# the steady state ($R = k_4/k_3 = 100$, $F = k_1/k_2 = 375$), and the ODE goes around the
+# outermost one, through 1.6 foxes. A run whose foxes stayed at 5 or 10 in the trough
+# has been knocked by noise onto a smaller orbit. That orbit is closer to the steady
+# state, so the cycle has a smaller amplitude and a shorter period. The check above
+# shows this both ways:
+#
+# - In the ODE, a cycle through a trough of 5 foxes peaks at 2305 foxes, 125 days after
+#   the trough. A cycle through 1.6 foxes peaks at 2802, 130 days after.
+# - In the KMC, runs with a deeper trough had later and higher peaks: the correlation
+#   of trough minimum with peak time is −0.64, and with height −0.59. The survivors'
+#   troughs bottomed out between 1 and 14 foxes. In 11 of the 36 runs a single fox was
+#   left and still recovered. Those 11 include the three latest peaks (days 447–480)
+#   and the three highest (3142–3604 foxes).
+#
+# The noise is not just scatter around the ODE answer. It moves the average, because
+# the deep troughs that give ODE-like peaks are also the ones most likely to kill the
+# foxes. **The mean second peak is a statistic of survivors only.** It is conditional on
+# a 36% event and says nothing about the other 64 runs.
+#
+# **What the definition gets wrong.**
+#
+# 1. **It takes the maximum of a noisy curve, not the top of the cycle.** Near the
+#    peak the population jitters by about ±10 foxes, and `second_peak` picks the highest
+#    spike. On average its height is 13 foxes (0.6%) above the peak of a 2-day average,
+#    and always above it (+7 to +22). Its time is the moment of one lucky birth. In run 28
+#    (the plot above) the top of the cycle is flat and double-humped from about day 360
+#    to 367. The definition picks a spike on the second hump at day 365.6, 3.6 days from the
+#    smoothed peak at day 362, and could just as easily have picked the first. I wouldn't
+#    call either spike *the* peak: the peak is the whole flat top. These errors are
+#    small next to the run-to-run spread (standard deviation 33 days and 511 foxes), so
+#    they don't change the conclusions.
+# 2. **The window is hand-tuned for these rate constants.** "After day 200, more than 5
+#    days from day 600" works because, here, the first peak has died away to about 10
+#    foxes by day 200 and every second peak comes by about day 480. A run that came out
+#    of the trough late would peak after day 595 and be counted as "no peak". If its
+#    foxes were still rising at day 600, a noise dip just before could make the
+#    definition pick a point on the rising edge. I looked for these in 400 seeds and
+#    found none, so it doesn't bite here, but the definition doesn't check that it has
+#    found a maximum with a rise before it and a fall after it.
+# 3. **It never asks what happened in between.** A run whose foxes died out after day
+#    250 has a maximum after day 200 of a few foxes, which is under the 100 threshold, so
+#    it is correctly counted as "no peak". But the threshold of 100 is arbitrary: a cycle
+#    that recovered to only 90 foxes would be called no peak at all.
 
 # %% [markdown]
 # ## 4. How many runs are enough?
