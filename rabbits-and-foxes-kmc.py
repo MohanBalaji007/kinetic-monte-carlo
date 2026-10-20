@@ -600,9 +600,174 @@ plt.show()
 #   ranges, to a precision you can justify. Say how you justified it.
 
 # %%
+def run_set(n_runs, seed):
+    """Run n_runs trajectories, keeping only what tasks 4 and 5 need from each.
+
+    Storing every trajectory would take about 0.5 MB per run, so instead this returns
+    peaks:      (n_runs, 2) array of second-peak (time, height), NaN where there is none
+    foxes_end:  foxes at t_end
+    t_extinct:  time the last fox died, NaN if foxes are still alive at t_end
+    """
+    rng = np.random.default_rng(seed)
+    peaks = np.full((n_runs, 2), np.nan)
+    foxes_end = np.zeros(n_runs, dtype=int)
+    t_extinct = np.full(n_runs, np.nan)
+    for n in range(n_runs):
+        times, rabbits, foxes = kmc(R0, F0, t_end, rng)
+        p = second_peak(times, foxes)
+        if p is not None:
+            peaks[n] = p
+        foxes_end[n] = foxes[np.searchsorted(times, t_end, side="right") - 1]
+        if foxes_end[n] == 0:
+            t_extinct[n] = times[np.argmax(foxes == 0)]  # zero is absorbing: first zero is the last fox
+    return peaks, foxes_end, t_extinct
+
+
+# Time it first
+n_test = 50
+start = time.perf_counter()
+run_set(n_test, seed=0)
+per_run = (time.perf_counter() - start) / n_test
+print(f"{per_run * 1000:.0f} ms per run: 3000 runs will take about {3000 * per_run / 60:.1f} min, "
+      f"all four sets (4400 runs) about {4400 * per_run / 60:.1f} min")
+
+# %%
+run_counts = [100, 300, 1000, 3000]
+sets = {}
+for seed, N in enumerate(run_counts, start=4):  # an independent set of runs for each N
+    start = time.perf_counter()
+    sets[N] = run_set(N, seed)
+    print(f"N = {N:4d}: {time.perf_counter() - start:5.1f} s")
+
+rows = []
+for N in run_counts:
+    peaks = sets[N][0]
+    peaks = peaks[~np.isnan(peaks[:, 0])]
+    n = len(peaks)
+    p = n / N
+    row = {"N": N, "n": n, "p": p, "p_se": np.sqrt(p * (1 - p) / N)}
+    for column, name in [(0, "time"), (1, "height")]:
+        x = peaks[:, column]
+        row[name] = x.mean()
+        row[name + "_s"] = x.std(ddof=1)
+        row[name + "_se"] = x.std(ddof=1) / np.sqrt(n)
+        row[name + "_median"] = np.median(x)
+        row[name + "_iqr"] = np.percentile(x, [25, 75])
+    rows.append(row)
+
+print(f"\n{'N':>5} {'peaks':>6} {'fraction':>13} | {'mean time':>15} {'s':>5} {'median':>6} "
+      f"{'IQR':>13} | {'mean height':>15} {'s':>5} {'median':>6} {'IQR':>11}")
+for r in rows:
+    print(f"{r['N']:5d} {r['n']:6d} {r['p']:6.3f} ± {r['p_se']:.3f} | "
+          f"{r['time']:7.1f} ± {r['time_se']:4.1f} {r['time_s']:5.1f} {r['time_median']:6.1f} "
+          f"{r['time_iqr'][0]:5.1f}–{r['time_iqr'][1]:5.1f} | "
+          f"{r['height']:7.0f} ± {r['height_se']:4.0f} {r['height_s']:5.0f} {r['height_median']:6.0f} "
+          f"{r['height_iqr'][0]:4.0f}–{r['height_iqr'][1]:4.0f}")
+
+# %%
+n_peaks = np.array([r["n"] for r in rows])
+fig, axes = plt.subplots(1, 3, figsize=(15, 4))
+for ax, name, ode_value, unit in [(axes[0], "time", t_ode_peak, "days"),
+                                  (axes[1], "height", F_ode_peak, "foxes")]:
+    ax.errorbar(run_counts, [r[name] for r in rows], yerr=[r[name + "_se"] for r in rows],
+                fmt="o", capsize=4, label="KMC mean ± standard error")
+    ax.axhline(ode_value, color="k", lw=1, ls="--", label="ODE")
+    ax.set_xscale("log")
+    ax.set_xlabel("number of runs, N")
+    ax.set_ylabel(f"mean second-peak {name} ({unit})")
+    ax.legend()
+
+ax = axes[2]
+for name, marker in [("time", "o"), ("height", "s")]:
+    se = np.array([r[name + "_se"] for r in rows])
+    ax.loglog(n_peaks, se / se[0], marker, label=f"{name}")
+ax.loglog(n_peaks, np.sqrt(n_peaks[0] / n_peaks), "k--", label=r"$\propto 1/\sqrt{n}$")
+ax.set_xlabel("runs with a second peak, n")
+ax.set_ylabel("standard error, relative to N = 100")
+ax.legend()
+plt.tight_layout()
+plt.show()
+
+# %% [markdown]
+# How precisely do we know the interquartile range? The standard error formula is for
+# a mean, not a percentile, so I estimated it by **bootstrapping**: resample the 3000-run
+# set's peaks with replacement many times, recompute the percentiles each time, and take
+# their standard deviation.
+
+# %%
+peaks_3000 = sets[3000][0]
+peaks_3000 = peaks_3000[~np.isnan(peaks_3000[:, 0])]
+rng = np.random.default_rng(8)
+n_boot = 2000
+boot = np.array([
+    np.percentile(peaks_3000[rng.integers(0, len(peaks_3000), len(peaks_3000))],
+                  [25, 50, 75], axis=0)
+    for _ in range(n_boot)
+])  # shape (n_boot, 3 percentiles, 2 columns)
+for column, name, unit in [(0, "time", "days"), (1, "height", "foxes")]:
+    estimate = np.percentile(peaks_3000[:, column], [25, 50, 75])
+    spread = boot[:, :, column].std(axis=0)
+    print(f"{name:6s}: 25th {estimate[0]:7.1f} ± {spread[0]:4.1f}   median {estimate[1]:7.1f} ± "
+          f"{spread[1]:4.1f}   75th {estimate[2]:7.1f} ± {spread[2]:4.1f} {unit}")
 
 # %% [markdown]
 # *Answer:*
+#
+# **Timing first.** One run takes about 53 ms, so I estimated 2.6 min for 3000 runs and
+# 3.9 min for all four sets (4400 runs). The 3000 actually took 2.6 min. Each $N$ is an
+# independent set of runs with its own seed, so the four results are four separate
+# experiments.
+#
+# **How the means change with the number of runs.** The mean time goes 406 → 401 → 401
+# → 401 days, and the mean height 2466 → 2446 → 2343 → 2383 foxes. With 100 runs (only
+# 24 peaks) the means are off by about 5 days and 80 foxes, but every set agrees with
+# the 3000-run value to within about 1–2 of its own standard errors. That includes
+# task 3's 100-run set (405 days, 2282 foxes), which is within about 1.2 standard errors.
+# The means don't drift in one direction as $N$ grows. They scatter less and less around
+# a fixed value. The **standard deviation** $s$ does not shrink: it stays at about 30
+# days and 620 foxes for every $N$. It measures the real spread from run to run, which
+# is a property of the process, not of how many runs we do.
+#
+# **Standard error.** With $n$ = 24, 112, 314 and 992 peaks, the standard error of the
+# mean time falls 6.3 → 3.1 → 1.7 → 0.9 days, and of the height 149 → 59 → 36 → 20 foxes.
+# On the log-log plot these follow the $1/\sqrt{n}$ line. The fitted slopes, from
+# $n = 24$ to $992$, are $-0.52$ (time) and $-0.54$ (height), against the expected
+# $-0.5$, since $s$ is constant and the standard error is $s/\sqrt{n}$. So
+# **halving the error costs four times as many runs**: one more significant figure costs
+# 100 times as many. Only about a third of the runs have a second peak, so for the
+# peak statistics $n \approx N/3$.
+#
+# **The answer, from the 3000-run set:**
+#
+# | | mean | interquartile range |
+# |---|---|---|
+# | time of second peak | **401 ± 1 days** | **379 to 420 days** (each end ± 1) |
+# | height of second peak | **2380 ± 20 foxes** | **1940 to 2670 foxes** (each end ± 20–30) |
+#
+# There's a second peak in 33.1 ± 0.9% of runs. For comparison, the ODE peaks at day
+# 428 with 2804 foxes, which is 30 standard errors later in time and 21 higher, so the
+# difference from task 3 is real and not noise.
+#
+# **How I justified the precision.**
+#
+# - For the **means** I used the standard error, $s/\sqrt{n}$: 0.9 days and 20 foxes.
+#   The digits beyond that are noise, so I round the mean time to the nearest day and
+#   the height to the nearest 10 foxes, and quote the ± so the uncertainty is explicit.
+# - The ± on the mean is not the spread of the peaks themselves. A single run's peak
+#   still varies with a standard deviation of about 30 days and 620 foxes, which is
+#   what the interquartile range describes.
+# - A **percentile** has no simple $s/\sqrt{n}$ formula. So I **bootstrapped** it:
+#   resampled the 992 peaks with replacement 2000 times, recomputed the 25th and 75th
+#   percentiles each time, and took their standard deviation. That gives about ±1 day
+#   for the time quartiles and ±21 to ±32 foxes for the height quartiles, so the time
+#   quartiles go to the nearest day and the height quartiles to the nearest 10 foxes.
+# - The table above is a cross-check. The 1000- and 3000-run sets give quartiles that
+#   agree to within 1–3 days and 60 foxes, which is consistent with those uncertainties.
+#   The 100-run sets wander by 5–15 days and 200 foxes.
+# - All of these uncertainties are for the statistics **as defined** by `second_peak`.
+#   The definition itself overstates the height by about 13 foxes because it picks a
+#   noise spike (task 3), a bias comparable to the ±20 standard error that more runs
+#   would not remove.
 
 # %% [markdown]
 # ## 5. How likely is it that the foxes die out?
