@@ -903,6 +903,28 @@ plt.show()
 
 # %% [markdown]
 # *Answer:*
+#
+# My project is on lithium-ion battery degradation. Here a continuum model is fine for
+# the **average** fade but could mislead me about **failure**, much as the ODE does
+# about the foxes. Capacity fade from the growth of the solid–electrolyte interphase
+# (SEI) involves about $10^{22}$ lithium ions in a typical 3 Ah cell, so an ODE or PDE (an
+# SEI thickness growing like $\sqrt{t}$, or a pseudo-2D electrode model) averages over
+# enormous numbers and the noise is negligible, just as KMC matched the ODE at the first
+# fox peak. But the processes that end a cell's life suddenly are rare, local and
+# discrete: lithium plating nucleating at one spot, at a rate that rises steeply once the
+# local overpotential goes negative during fast charging or at low temperature
+# (Butler–Volmer kinetics); a dendrite growing through the separator and causing an
+# internal short; a single electrode particle cracking, at a rate that depends on the
+# diffusion-induced stress in that particle and on the number of cycles; or a particle
+# losing electrical contact and dropping out.
+# Each of these could be a KMC event, with a rate set by the local state (overpotential,
+# temperature, stress, state of charge). A continuum model gives each cell the same
+# smooth, average fade curve. It can't produce the spread from cell to cell, or the
+# small fraction of cells that fail early because one nucleation event happened in the
+# wrong place, in the same way the ODE couldn't produce 68% of fox populations dying
+# out. For that I'd need a stochastic model: KMC for the events at the particle or
+# surface scale, or at least a probabilistic failure model layered on the continuum
+# fade.
 
 # %% [markdown]
 # ## Stretch problems
